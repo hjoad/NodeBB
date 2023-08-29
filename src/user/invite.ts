@@ -9,6 +9,7 @@ import emailer from '../emailer';
 import groups from '../groups';
 import translator from '../translator';
 import utils from '../utils';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import plugins from '../plugins';
 
 interface InvitationQuery {
@@ -107,6 +108,86 @@ export = function (User: UserObject) {
     };
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async function deleteFromReferenceList(uid: string, email: string): Promise<void> {
+        await Promise.all([
+            await db.setRemove(`invitation:uid:${uid}`, email),
+            await db.delete(`invitation:uid:${uid}:invited:${email}`),
+        ]);
+        const count = await db.setCount(`invitation:uid:${uid}`);
+        if (count === 0) {
+            await db.setRemove('invitation:uids', uid);
+        }
+    }
+
+    User.confirmIfInviteEmailIsUsed = async function (token: string, enteredEmail: string, uid: string) {
+        if (!enteredEmail) {
+            return;
+        }
+        const email = await db.getObjectField(`invitation:token:${token}`, 'email');
+        // "Confirm" user's email if registration completed with invited address
+        if (email && email === enteredEmail) {
+            await User.confirmByUid(uid);
+        }
+    };
+
+    User.joinGroupsFromInvitation = async function (uid: string, token: string) {
+        const groupsToJoinJson: string | null = await db.getObjectField(`invitation:token:${token}`, 'groupsToJoin');
+
+        if (!groupsToJoinJson) {
+            return;
+        }
+
+        let groupsToJoin: string[] = [];
+        try {
+            groupsToJoin = JSON.parse(groupsToJoinJson) as string[]; // Cast to string[]
+        } catch (e) {
+            return;
+        }
+
+        if (groupsToJoin.length < 1) {
+            return;
+        }
+
+        await groups.join(groupsToJoin, uid);
+    };
+
+
+    User.deleteInvitation = async function (invitedBy: string, email: string): Promise<void> {
+        const invitedByUid = await User.getUidByUsername(invitedBy);
+        if (!invitedByUid) {
+            throw new Error('[[error:invalid-username]]');
+        }
+        const token = await db.get(`invitation:uid:${invitedByUid}:invited:${email}`);
+        await Promise.all([
+            deleteFromReferenceList(invitedByUid, email),
+            db.setRemove(`invitation:invited:${email}`, token),
+            db.delete(`invitation:token:${token}`),
+        ]);
+    };
+
+    User.deleteInvitationKey = async function (registrationEmail: string, token: string): Promise<void> {
+        if (registrationEmail) {
+            const uids = await User.getInvitingUsers();
+            await Promise.all(uids.map(uid => deleteFromReferenceList(uid, registrationEmail)));
+            // Delete all invites to an email address if it has joined
+            const tokens = await db.getSetMembers(`invitation:invited:${registrationEmail}`);
+            const keysToDelete = [`invitation:invited:${registrationEmail}`, ...tokens.map(token => `invitation:token:${token}`)];
+            await db.deleteAll(keysToDelete);
+        }
+        if (token) {
+            const invite = await db.getObject(`invitation:token:${token}`);
+            if (!invite) {
+                return;
+            }
+            await deleteFromReferenceList(invite.inviter, invite.email);
+            await db.deleteAll([
+                `invitation:invited:${invite.email}`,
+                `invitation:token:${token}`,
+            ]);
+        }
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async function prepareInvitation(uid: string, email: string, groupsToJoin: string[]) {
         const inviterExists = await User.exists(uid);
         if (!inviterExists) {
@@ -152,122 +233,6 @@ export = function (User: UserObject) {
             username: username,
             template: 'invitation',
             expireDays: expireDays,
-        };
-
-        User.sendInvitationEmail = async function (uid: string, email: string, groupsToJoin: string[]): Promise<void> {
-            if (!uid) {
-                throw new Error('[[error:invalid-uid]]');
-            }
-
-            const email_exists: string | null = await User.getUidByEmail(email);
-            if (email_exists) {
-                // Silently drop the invitation if the invited email already exists locally
-                return;
-            }
-
-            const invitation_exists: boolean = await db.exists(`invitation:uid:${uid}:invited:${email}`);
-            if (invitation_exists) {
-                throw new Error('[[error:email-invited]]');
-            }
-
-            const data = {
-                ...emailer._defaultPayload,
-                site_title: title,
-                registerLink: registerLink,
-                subject: subject,
-                username: username,
-                template: 'invitation',
-                expireDays: expireDays,
-            };
-            await emailer.sendToEmail('invitation', email, metaConfig.defaultLang, data);
-            await plugins.hooks.fire('action:user.invite', { uid, email, groupsToJoin });
-        };
-
-        User.verifyInvitation = async function (query: InvitationQuery) {
-            if (!query.token) {
-                if (metaConfig.registrationType.startsWith('admin-')) {
-                    throw new Error('[[register:invite.error-admin-only]]');
-                } else {
-                    throw new Error('[[register:invite.error-invite-only]]');
-                }
-            }
-            const token = await db.getObjectField(`invitation:token:${query.token}`, 'token');
-            if (!token || token !== query.token) {
-                throw new Error('[[register:invite.error-invalid-data]]');
-            }
-        };
-
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        async function deleteFromReferenceList(uid: string, email: string): Promise<void> {
-            await Promise.all([
-                await db.setRemove(`invitation:uid:${uid}`, email),
-                await db.delete(`invitation:uid:${uid}:invited:${email}`),
-            ]);
-            const count = await db.setCount(`invitation:uid:${uid}`);
-            if (count === 0) {
-                await db.setRemove('invitation:uids', uid);
-            }
-        }
-
-        User.confirmIfInviteEmailIsUsed = async function (token: string, enteredEmail: string, uid: string) {
-            if (!enteredEmail) {
-                return;
-            }
-            const email = await db.getObjectField(`invitation:token:${token}`, 'email');
-            // "Confirm" user's email if registration completed with invited address
-            if (email && email === enteredEmail) {
-                await User.confirmByUid(uid);
-            }
-        };
-
-        User.joinGroupsFromInvitation = async function (uid: string, token: string) {
-            const groupsToJoinJSON = await db.getObjectField(`invitation:token:${token}`, 'groupsToJoin');
-
-            try {
-                groupsToJoin = JSON.parse(groupsToJoinJSON) as string[];
-            } catch (e) {
-                return;
-            }
-            if (!groupsToJoin || groupsToJoin.length < 1) {
-                return;
-            }
-
-            await groups.join(groupsToJoin, uid);
-        };
-
-        User.deleteInvitation = async function (invitedBy: string, email: string): Promise<void> {
-            const invitedByUid = await User.getUidByUsername(invitedBy);
-            if (!invitedByUid) {
-                throw new Error('[[error:invalid-username]]');
-            }
-            const token = await db.get(`invitation:uid:${invitedByUid}:invited:${email}`);
-            await Promise.all([
-                deleteFromReferenceList(invitedByUid, email),
-                db.setRemove(`invitation:invited:${email}`, token),
-                db.delete(`invitation:token:${token}`),
-            ]);
-        };
-
-        User.deleteInvitationKey = async function (registrationEmail: string, token: string): Promise<void> {
-            if (registrationEmail) {
-                const uids = await User.getInvitingUsers();
-                await Promise.all(uids.map(uid => deleteFromReferenceList(uid, registrationEmail)));
-                // Delete all invites to an email address if it has joined
-                const tokens = await db.getSetMembers(`invitation:invited:${registrationEmail}`);
-                const keysToDelete = [`invitation:invited:${registrationEmail}`, ...tokens.map(token => `invitation:token:${token}`)];
-                await db.deleteAll(keysToDelete);
-            }
-            if (token) {
-                const invite = await db.getObject(`invitation:token:${token}`);
-                if (!invite) {
-                    return;
-                }
-                await deleteFromReferenceList(invite.inviter, invite.email);
-                await db.deleteAll([
-                    `invitation:invited:${invite.email}`,
-                    `invitation:token:${token}`,
-                ]);
-            }
         };
     }
 };
