@@ -107,7 +107,6 @@ export = function (User: UserObject) {
         return Promise.all(invitationsPromises);
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async function deleteFromReferenceList(uid: string, email: string): Promise<void> {
         await Promise.all([
             await db.setRemove(`invitation:uid:${uid}`, email),
